@@ -502,7 +502,7 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
     {
         var webhookUrlBuilder = new UriBuilder(webhookUrl);
         var queryString = HttpUtility.ParseQueryString(webhookUrlBuilder.Query);
-        queryString["invoice_number"] = invoiceNumber;
+        queryString[MollieConstants.WebhookInvoiceNumberProperty] = invoiceNumber;
 
         webhookUrlBuilder.Query = queryString.ToString() ?? String.Empty;
 
