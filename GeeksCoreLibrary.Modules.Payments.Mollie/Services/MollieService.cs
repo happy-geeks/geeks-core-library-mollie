@@ -198,7 +198,7 @@ public class MollieService : PaymentServiceProviderBaseService, IPaymentServiceP
     public async Task<PaymentReturnResult> HandlePaymentReturnAsync(OrderProcessSettingsModel orderProcessSettings, PaymentMethodSettingsModel paymentMethodSettings)
     {
         var mollieSettings = (MollieSettingsModel) paymentMethodSettings.PaymentServiceProvider;
-        var invoiceNumber = HttpContextHelpers.GetRequestValue(httpContextAccessor?.HttpContext, "invoice_number");
+        var invoiceNumber = HttpContextHelpers.GetRequestValue(httpContextAccessor?.HttpContext, MollieConstants.WebhookInvoiceNumberProperty);
 
         var baskets = await shoppingBasketsService.GetOrdersByUniquePaymentNumberAsync(invoiceNumber);
         if (baskets == null || baskets.Count == 0)
