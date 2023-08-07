@@ -500,7 +500,6 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
 
     private string BuildUrl(string webhookUrl, string invoiceNumber)
     {
-        // TODO: Refactor this method so that we can use it for all PSPs.
         var webhookUrlBuilder = new UriBuilder(webhookUrl);
         var queryString = HttpUtility.ParseQueryString(webhookUrlBuilder.Query);
         queryString["invoice_number"] = invoiceNumber;
