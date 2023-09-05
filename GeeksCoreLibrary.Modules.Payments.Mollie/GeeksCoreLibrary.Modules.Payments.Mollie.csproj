@@ -15,7 +15,7 @@
     </ItemGroup>
 
 	<ItemGroup>
-      <PackageReference Include="Mollie.Api" Version="2.3.0.1" />
+      <PackageReference Include="Mollie.Api" Version="3.0.0" />
 	</ItemGroup>
 
 
