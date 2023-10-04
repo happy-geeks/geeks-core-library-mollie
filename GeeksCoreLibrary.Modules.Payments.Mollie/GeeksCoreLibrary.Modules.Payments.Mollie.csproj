@@ -12,7 +12,7 @@
 
 	<ItemGroup>
       <PackageReference Include="GeeksCoreLibrary" Version="4.0.1" />
-      <PackageReference Include="Mollie.Api" Version="3.0.0" />
+      <PackageReference Include="Mollie.Api" Version="3.3.0" />
 	</ItemGroup>
 
 
