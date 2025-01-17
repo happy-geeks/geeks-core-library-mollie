@@ -12,12 +12,9 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="libphonenumber-csharp" Version="8.13.52"/>
-        <PackageReference Include="Mollie.Api" Version="4.4.2"/>
-    </ItemGroup>
-
-    <ItemGroup>
-        <ProjectReference Include="..\..\GeeksCoreLibrary\GeeksCoreLibrary\GeeksCoreLibrary.csproj"/>
+        <PackageReference Include="GeeksCoreLibrary" Version="5.0.2501.1" />
+        <PackageReference Include="libphonenumber-csharp" Version="8.13.52" />
+        <PackageReference Include="Mollie.Api" Version="4.4.2" />
     </ItemGroup>
 
 
