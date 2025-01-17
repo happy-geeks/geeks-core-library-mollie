@@ -1,4 +1,5 @@
 ﻿using System.Globalization;
+using System.Net;
 using System.Reflection;
 using System.Text;
 using System.Web;
@@ -24,7 +25,9 @@ using Microsoft.Extensions.Options;
 using Mollie.Api.Client;
 using Mollie.Api.Models;
 using Mollie.Api.Models.Order;
+using Mollie.Api.Models.Order.Request;
 using Mollie.Api.Models.Order.Request.PaymentSpecificParameters;
+using Mollie.Api.Models.Order.Response;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using PhoneNumbers;
@@ -34,78 +37,99 @@ using Constants = GeeksCoreLibrary.Components.OrderProcess.Models.Constants;
 namespace GeeksCoreLibrary.Modules.Payments.Mollie.Services;
 
 /// <inheritdoc cref="IPaymentServiceProviderService" />
-public class MollieService : PaymentServiceProviderBaseService, IPaymentServiceProviderService, IScopedService
+public class MollieService(
+    ILogger<MollieService> logger,
+    IObjectsService objectsService,
+    IShoppingBasketsService shoppingBasketsService,
+    IDatabaseConnection databaseConnection,
+    IDatabaseHelpersService databaseHelpersService,
+    IOptions<GclSettings> gclSettings,
+    IHttpContextAccessor? httpContextAccessor = null)
+    : PaymentServiceProviderBaseService(databaseHelpersService, databaseConnection, logger, httpContextAccessor), IPaymentServiceProviderService, IScopedService
 {
-    private readonly ILogger<MollieService> logger;
-    private readonly IHttpContextAccessor httpContextAccessor;
-    private readonly IObjectsService objectsService;
-    private readonly IShoppingBasketsService shoppingBasketsService;
-    private readonly IDatabaseConnection databaseConnection;
-    private readonly GclSettings gclSettings;
+    private const string BaseUrl = "https://api.mollie.com/v2/orders";
+    private readonly IHttpContextAccessor? httpContextAccessor = httpContextAccessor;
+    private readonly IDatabaseConnection databaseConnection = databaseConnection;
+    private readonly GclSettings gclSettings = gclSettings.Value;
 
-    public MollieService(
-        ILogger<MollieService> logger,
-        IObjectsService objectsService,
-        IShoppingBasketsService shoppingBasketsService,
-        IDatabaseConnection databaseConnection,
-        IDatabaseHelpersService databaseHelpersService,
-        IOptions<GclSettings> gclSettings,
-        IHttpContextAccessor httpContextAccessor = null)
-        : base(databaseHelpersService, databaseConnection, logger, httpContextAccessor)
-    {
-        this.logger = logger;
-        this.httpContextAccessor = httpContextAccessor;
-        this.objectsService = objectsService;
-        this.shoppingBasketsService = shoppingBasketsService;
-        this.databaseConnection = databaseConnection;
-        this.gclSettings = gclSettings.Value;
-    }
+    private string? invoiceNumber;
 
     /// <inheritdoc />
     public async Task<PaymentRequestResult> HandlePaymentRequestAsync(
         ICollection<(WiserItemModel Main, List<WiserItemModel> Lines)> shoppingBaskets,
         WiserItemModel userDetails,
         PaymentMethodSettingsModel paymentMethodSettings,
-        string invoiceNumber)
+        string localInvoiceNumber)
     {
-        if (httpContextAccessor?.HttpContext == null)
-        {
-            return new PaymentRequestResult
-            {
-                Successful = false,
-                Action = PaymentRequestActions.Redirect,
-                ActionData = paymentMethodSettings.PaymentServiceProvider.FailUrl
-            };
-        }
-
-        // Retrieve the API key. A development-specific one can be set for testing on development environments.
+        invoiceNumber = localInvoiceNumber;
         var mollieSettings = (MollieSettingsModel) paymentMethodSettings.PaymentServiceProvider;
-        mollieSettings.Locale = await objectsService.FindSystemObjectByDomainNameAsync("MOLLIE_locale");
+        var status = 0;
+        var requestFormValues = "";
+        var error = "";
+        var responseBody = "";
 
-        // Locale is required for the mollie Orders api so if we couldn't find the locale
-        // we set it using the request headers send by the browser
-        // if that is not set we use EN-us as the default
-        if (String.IsNullOrWhiteSpace(mollieSettings.Locale))
-        {
-            mollieSettings.Locale = httpContextAccessor?.HttpContext.Request.Headers.AcceptLanguage.First();
-            mollieSettings.Locale = mollieSettings.Locale?.Split(',').First() ?? "EN-us";
-        }
-
-        var mollieClient = new OrderClient(mollieSettings.ApiKey);
-        var orderRequest = await CreateOrderRequestAsync(
-            invoiceNumber,
-            shoppingBaskets,
-            userDetails,
-            paymentMethodSettings);
-
-        OrderResponse orderResponse;
         try
         {
-            orderResponse = await mollieClient.CreateOrderAsync(orderRequest);
+            var invalidSettings = new List<string>();
+            if (String.IsNullOrWhiteSpace(mollieSettings.ApiKey))
+            {
+                invalidSettings.Add(nameof(mollieSettings.ApiKey));
+            }
+
+            if (invalidSettings.Count != 0)
+            {
+                logger.LogError($"Validation in '{nameof(HandlePaymentRequestAsync)}' of '{nameof(MollieService)}' failed because the following required settings do not have a (valid) value: {String.Join(", ", invalidSettings)}.");
+                return new PaymentRequestResult
+                {
+                    Successful = false,
+                    Action = PaymentRequestActions.Redirect,
+                    ActionData = mollieSettings.FailUrl
+                };
+            }
+
+            if (httpContextAccessor?.HttpContext == null)
+            {
+                return new PaymentRequestResult
+                {
+                    Successful = false,
+                    Action = PaymentRequestActions.Redirect,
+                    ActionData = paymentMethodSettings.PaymentServiceProvider.FailUrl
+                };
+            }
+
+            // Retrieve the API key. A development-specific one can be set for testing on development environments.
+            mollieSettings.Locale = await objectsService.FindSystemObjectByDomainNameAsync("MOLLIE_locale");
+
+            // Locale is required for the mollie Orders api so if we couldn't find the locale
+            // we set it using the request headers send by the browser
+            // if that is not set we use EN-us as the default
+            if (String.IsNullOrWhiteSpace(mollieSettings.Locale))
+            {
+                mollieSettings.Locale = httpContextAccessor?.HttpContext.Request.Headers.AcceptLanguage.First();
+                mollieSettings.Locale = mollieSettings.Locale?.Split(',').First() ?? "EN-us";
+            }
+
+            using var mollieClient = new OrderClient(mollieSettings.ApiKey!);
+            var orderRequest = await CreateOrderRequestAsync(shoppingBaskets, userDetails, paymentMethodSettings);
+
+            var orderResponse = await mollieClient.CreateOrderAsync(orderRequest);
+
+            var paymentId = orderResponse.Id;
+            await ProcessOrderResponseAsync(paymentId, orderResponse.Status, shoppingBaskets);
+            status = (int) HttpStatusCode.OK;
+
+            return new PaymentRequestResult
+            {
+                Successful = true,
+                Action = PaymentRequestActions.Redirect,
+                ActionData = orderResponse.Links.Checkout?.Href
+            };
         }
-        catch (MollieApiException ex)
+        catch (MollieApiException mollieApiException)
         {
-            logger.LogError(ex, "An error occurred while trying to create an order via the Mollie Order API.");
+            error = mollieApiException.ToString();
+            status = (int) HttpStatusCode.InternalServerError;
+            logger.LogError(mollieApiException, "An error occurred while trying to create an order via the Mollie Order API.");
 
             // Payment request failed.
             return new PaymentRequestResult
@@ -113,20 +137,29 @@ public class MollieService : PaymentServiceProviderBaseService, IPaymentServiceP
                 Successful = false,
                 Action = PaymentRequestActions.Redirect,
                 ActionData = mollieSettings.FailUrl,
-                ErrorMessage = GetErrorMessageInResponse(JObject.Parse(ex.Message))
+                ErrorMessage = GetErrorMessageInResponse(JObject.Parse(mollieApiException.Message))
             };
         }
-
-        var paymentId = orderResponse.Id;
-        var status = orderResponse.Status;
-        await ProcessOrderResponseAsync(paymentId, status, shoppingBaskets);
-
-        return new PaymentRequestResult
+        catch (Exception exception)
         {
-            Successful = true,
-            Action = PaymentRequestActions.Redirect,
-            ActionData = orderResponse.Links.Checkout.Href
-        };
+            error = exception.ToString();
+            status = (int) HttpStatusCode.InternalServerError;
+            logger.LogError($"Starting a payment transaction with Dimoco failed because we got an unhandled exception: {exception}");
+            return new PaymentRequestResult
+            {
+                Successful = false,
+                Action = PaymentRequestActions.Redirect,
+                ActionData = mollieSettings.FailUrl,
+                ErrorMessage = exception.Message
+            };
+        }
+        finally
+        {
+            if (mollieSettings.LogAllRequests)
+            {
+                await AddLogEntryAsync(PaymentServiceProviders.Dimoco, invoiceNumber, status, requestFormValues: requestFormValues, responseBody: responseBody, error: error, url: BaseUrl, isIncomingRequest: false);
+            }
+        }
     }
 
     private async Task ProcessOrderResponseAsync(string paymentId, string status, ICollection<(WiserItemModel Main, List<WiserItemModel> Lines)> shoppingBaskets)
@@ -152,53 +185,72 @@ public class MollieService : PaymentServiceProviderBaseService, IPaymentServiceP
     /// <inheritdoc />
     public async Task<StatusUpdateResult> ProcessStatusUpdateAsync(OrderProcessSettingsModel orderProcessSettings, PaymentMethodSettingsModel paymentMethodSettings)
     {
-        if (httpContextAccessor?.HttpContext == null)
-        {
-            return new StatusUpdateResult
-            {
-                Successful = false,
-                Status = "Error retrieving status: No HttpContext available."
-            };
-        }
-
         var mollieSettings = (MollieSettingsModel) paymentMethodSettings.PaymentServiceProvider;
-        var mollieClient = new OrderClient(mollieSettings.ApiKey);
+        var error = "";
+        var statusCode = 0;
 
-        // Mollie sends one POST parameter called "id".
-        var mollieOrderId = httpContextAccessor.HttpContext.Request.Form["id"];
-
-        OrderResponse mollieOrder;
         try
         {
-            mollieOrder = await mollieClient.GetOrderAsync(mollieOrderId);
+            if (httpContextAccessor?.HttpContext == null)
+            {
+                return new StatusUpdateResult
+                {
+                    Successful = false,
+                    Status = "Error retrieving status: No HttpContext available."
+                };
+            }
+
+            var mollieClient = new OrderClient(mollieSettings.ApiKey!);
+
+            // Mollie sends one POST parameter called "id".
+            var mollieOrderId = httpContextAccessor.HttpContext.Request.Form["id"];
+            if (String.IsNullOrWhiteSpace(mollieOrderId))
+            {
+                await LogIncomingPaymentActionAsync(PaymentServiceProviders.Mollie, String.Empty, 0, responseBody: "GCL: No ID found in request");
+                return new StatusUpdateResult
+                {
+                    Successful = false,
+                    Status = "error"
+                };
+            }
+
+            var mollieOrder = await mollieClient.GetOrderAsync(mollieOrderId!);
+
+            // The invoice number is sent as the metadata, which can be retrieved here.
+            invoiceNumber = mollieOrder.Metadata;
+
+            await LogIncomingPaymentActionAsync(PaymentServiceProviders.Mollie, invoiceNumber, 200, responseBody: JsonConvert.SerializeObject(mollieOrder));
+
+            return new StatusUpdateResult
+            {
+                Successful = mollieOrder.Status.Equals("paid", StringComparison.OrdinalIgnoreCase),
+                Status = mollieOrder.Status
+            };
         }
-        catch (MollieApiException ex)
+        catch (Exception exception)
         {
-            await LogIncomingPaymentActionAsync(PaymentServiceProviders.Mollie, String.Empty, ex.Details.Status, responseBody: ex.Message);
+            error = exception.ToString();
+            // Log any exceptions that may have occurred.
+            logger.LogError(exception, "Error processing Dimoco payment update.");
+            statusCode = (int) HttpStatusCode.InternalServerError;
             return new StatusUpdateResult
             {
                 Successful = false,
-                Status = "error"
+                Status = "Error processing PayPal payment Dimoco.",
+                StatusCode = statusCode
             };
         }
-
-        // The invoice number is sent as the metadata, which can be retrieved here.
-        var invoiceNumber = mollieOrder.Metadata;
-
-        await LogIncomingPaymentActionAsync(PaymentServiceProviders.Mollie, invoiceNumber, 200, responseBody: JsonConvert.SerializeObject(mollieOrder));
-
-        return new StatusUpdateResult
+        finally
         {
-            Successful = mollieOrder.Status.Equals("paid", StringComparison.OrdinalIgnoreCase),
-            Status = mollieOrder.Status
-        };
+            await LogIncomingPaymentActionAsync(PaymentServiceProviders.Dimoco, invoiceNumber, statusCode, error: error);
+        }
     }
 
     /// <inheritdoc />
     public async Task<PaymentReturnResult> HandlePaymentReturnAsync(OrderProcessSettingsModel orderProcessSettings, PaymentMethodSettingsModel paymentMethodSettings)
     {
         var mollieSettings = (MollieSettingsModel) paymentMethodSettings.PaymentServiceProvider;
-        var invoiceNumber = HttpContextHelpers.GetRequestValue(httpContextAccessor?.HttpContext, MollieConstants.WebhookInvoiceNumberProperty);
+        invoiceNumber = HttpContextHelpers.GetRequestValue(httpContextAccessor?.HttpContext, MollieConstants.WebhookInvoiceNumberProperty);
 
         var baskets = await shoppingBasketsService.GetOrdersByUniquePaymentNumberAsync(invoiceNumber);
         if (baskets == null || baskets.Count == 0)
@@ -216,7 +268,7 @@ public class MollieService : PaymentServiceProviderBaseService, IPaymentServiceP
         // The Mollie payment ID is saved in all baskets, so just use the one from the first basket.
         var mollieOrderId = baskets.First().Order.GetDetailValue(Constants.PaymentProviderTransactionId);
 
-        var mollieOrderClient = new OrderClient(mollieSettings.ApiKey);
+        var mollieOrderClient = new OrderClient(mollieSettings.ApiKey!);
 
         OrderResponse mollieOrder;
         try
@@ -295,9 +347,28 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
     }
 
     /// <inheritdoc />
-    public string GetInvoiceNumberFromRequest()
+    public Task<string> GetInvoiceNumberFromRequestAsync()
     {
-        return HttpContextHelpers.GetRequestValue(httpContextAccessor?.HttpContext, MollieConstants.WebhookInvoiceNumberProperty);
+        try
+        {
+            if (httpContextAccessor?.HttpContext?.Request.Form == null)
+            {
+                throw new Exception("No HTTP context available.");
+            }
+
+            invoiceNumber = httpContextAccessor.HttpContext.Request.Form[MollieConstants.WebhookInvoiceNumberProperty].ToString();
+            if (String.IsNullOrEmpty(invoiceNumber))
+            {
+                throw new Exception("No invoice number found in body of Dimoco webhook.");
+            }
+
+            return Task.FromResult(invoiceNumber);
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Error getting invoice number from request.");
+            throw;
+        }
     }
 
     /// <summary>
@@ -307,16 +378,15 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
     /// <returns>A combination of the title and detail properties, or the string "Unknown error" if title and detail are not present in the JObject.</returns>
     private static string GetErrorMessageInResponse(JObject response)
     {
-        if (response != null && response.ContainsKey("title") && response.ContainsKey("detail"))
+        if (response.TryGetValue("title", out var titleValue) && response.TryGetValue("detail", out var detailValue))
         {
-            return $"{response["title"]}: {response["detail"]}";
+            return $"{titleValue}: {detailValue}";
         }
 
         return "Unknown error";
     }
 
-    public async Task<OrderRequest> CreateOrderRequestAsync(
-        string invoiceNumber,
+    private async Task<OrderRequest> CreateOrderRequestAsync(
         ICollection<(WiserItemModel Main, List<WiserItemModel> Lines)> shoppingBaskets,
         WiserItemModel userDetails,
         PaymentMethodSettingsModel paymentMethodSettings)
@@ -326,9 +396,9 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
         var orderRequest = new OrderRequest
         {
             Amount = CreateAmountModel(totalPrice, mollieSettings.Currency),
-            OrderNumber = invoiceNumber,
-            RedirectUrl = BuildUrl(mollieSettings.ReturnUrl, invoiceNumber),
-            WebhookUrl = BuildUrl(mollieSettings.WebhookUrl, invoiceNumber),
+            OrderNumber = invoiceNumber!,
+            RedirectUrl = BuildUrl(mollieSettings.ReturnUrl),
+            WebhookUrl = BuildUrl(mollieSettings.WebhookUrl),
             Locale = mollieSettings.Locale,
             Method = paymentMethodSettings.ExternalName,
             Lines = await ConvertShoppingBasketsToOrderLinesAsync(shoppingBaskets, mollieSettings),
@@ -342,7 +412,7 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
             var issuerName = GetIssuerName(issuerValue);
             orderRequest.Payment = new IDealSpecificParameters
             {
-                Issuer = issuerName,
+                Issuer = issuerName
             };
         }
 
@@ -351,16 +421,16 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
         return orderRequest;
     }
 
-    private static string GetIssuerName(string issuerValue)
+    private static string? GetIssuerName(string issuerValue)
     {
         var issuerConstants = typeof(IdealIssuers).GetFields(BindingFlags.Public | BindingFlags.Static);
         var issuerConstant = issuerConstants.FirstOrDefault(mi =>
-                                                                mi.Name.Equals(issuerValue, StringComparison.OrdinalIgnoreCase) ||
-                                                                mi.Name.Equals($"ideal_{issuerValue}", StringComparison.OrdinalIgnoreCase));
+            mi.Name.Equals(issuerValue, StringComparison.OrdinalIgnoreCase) ||
+            mi.Name.Equals($"ideal_{issuerValue}", StringComparison.OrdinalIgnoreCase));
 
         if (issuerConstant != null)
         {
-            return (string) issuerConstant.GetValue(null);
+            return issuerConstant.GetValue(null) as string;
         }
 
         return null;
@@ -380,7 +450,7 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
             || String.IsNullOrWhiteSpace(city)
             || String.IsNullOrWhiteSpace(country))
         {
-            return null;
+            return new OrderAddressDetails();
         }
 
         var houseNumber = userDetails.GetDetailValue($"{detailKeyPrefix}housenumber");
@@ -391,7 +461,7 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
                 $"{street} {houseNumber}{houseNumberSuffix}",
             PostalCode = zipcode,
             City = city,
-            Country = country,
+            Country = country
         };
     }
 
@@ -433,9 +503,9 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
     }
 
     private async Task<OrderLineRequest> ConvertBasketLineToOrderLineAsync(WiserItemModel basket,
-                                                                           WiserItemModel basketLine,
-                                                                           ShoppingBasketCmsSettingsModel basketSettings,
-                                                                           MollieSettingsModel mollieSettings)
+        WiserItemModel basketLine,
+        ShoppingBasketCmsSettingsModel basketSettings,
+        MollieSettingsModel mollieSettings)
     {
         var name = basketLine.GetDetailValue("title");
 
@@ -472,7 +542,9 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
         // Some types of order lines do not have quantities
         // we set 1 for those
         if (!parseSucceeded)
+        {
             lineProductQuantity = 1;
+        }
 
         var vatRate = Convert.ToInt32(Math.Round(100 / linePrice * linePriceVatOnly));
         var vatFactor = await shoppingBasketsService.GetVatFactorByRateAsync(basket, basketSettings, vatRate) * 100;
@@ -485,20 +557,16 @@ AND paymentServiceProvider.entity_type = '{Constants.PaymentServiceProviderEntit
             DiscountAmount = CreateAmountModel(discountAmount, mollieSettings.Currency),
             VatAmount = CreateAmountModel(linePriceVatOnly, mollieSettings.Currency),
             Quantity = lineProductQuantity,
-            VatRate = vatFactor.ToString("F2", CultureInfo.InvariantCulture),
+            VatRate = vatFactor.ToString("F2", CultureInfo.InvariantCulture)
         };
     }
 
     private Amount CreateAmountModel(decimal price, string currency)
     {
-        return new Amount
-        {
-            Value = price.ToString("F2", CultureInfo.InvariantCulture),
-            Currency = currency
-        };
+        return new Amount(currency, price.ToString("F2", CultureInfo.InvariantCulture));
     }
 
-    private string BuildUrl(string webhookUrl, string invoiceNumber)
+    private string BuildUrl(string webhookUrl)
     {
         var webhookUrlBuilder = new UriBuilder(webhookUrl);
         var queryString = HttpUtility.ParseQueryString(webhookUrlBuilder.Query);
