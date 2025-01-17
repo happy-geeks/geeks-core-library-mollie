@@ -7,5 +7,5 @@ public class MollieSettingsModel : PaymentServiceProviderSettingsModel
     /// <summary>
     /// Gets or sets the API key for the current environment.
     /// </summary>
-    public string ApiKey { get; set; }
+    public string? ApiKey { get; set; }
 }
