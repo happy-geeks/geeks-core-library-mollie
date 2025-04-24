@@ -14,7 +14,7 @@
 
     <ItemGroup>
         <PackageReference Include="GeeksCoreLibrary" Version="5.3.2504.3" />
-        <PackageReference Include="libphonenumber-csharp" Version="8.13.52" />
+        <PackageReference Include="libphonenumber-csharp" Version="9.0.3" />
         <PackageReference Include="Mollie.Api" Version="4.4.2" />
     </ItemGroup>
 
