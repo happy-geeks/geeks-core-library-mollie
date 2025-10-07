@@ -5,9 +5,6 @@
 - **Language(s)**: C# (.NET 9.0)
 - **Framework(s)**: .NET 9.0, ASP.NET Core
 - **Database**: MySQL (via GeeksCoreLibrary)
-- **Status**: Production
-- **Critical Level**: High
-- **Last Updated**: October 2025
 
 ## Purpose & Context
 
