@@ -133,13 +133,6 @@ Configuration stored in Wiser database as `payment_service_provider` items:
 - Ensure all prices formatted to 2 decimals
 - Use decimal type (not double/float)
 
-## Known Issues & Technical Debt
-
-- [ ] **Error Log References Wrong Provider** - Some logs say "Dimoco" instead of "Mollie"
-- [ ] **Limited Webhook Security** - No verification that requests come from Mollie
-- [ ] **No Request Rate Limiting** - Webhook endpoint could be abused
-- [ ] **Minimal Unit Test Coverage** - Need comprehensive tests
-
 ## External Resources
 
 - [Mollie Orders API Documentation](https://docs.mollie.com/reference/v2/orders-api/overview)
